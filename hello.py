@@ -8,6 +8,7 @@ from sklearn.metrics import accuracy_score, classification_report
 import os
 import tempfile
 
+# 必须在 import matplotlib 之前设置，否则 matplotlib 已经用默认目录建好缓存，这行不生效。
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "matplotlib"))
 
 import matplotlib.pyplot as plt
@@ -41,17 +42,24 @@ class DigitRecognizer(nn.Module):
         super(DigitRecognizer, self).__init__()
         self.conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.fc1 = nn.Linear(64 * 7 * 7, 128)
-        self.fc2 = nn.Linear(128, 10)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.relu = nn.ReLU()
+        self.fc1 = nn.Linear(self._flattened_features(28), 128)
+        self.fc2 = nn.Linear(128, 10)
+
+    def _flattened_features(self, image_size):
+        """用一张假输入过一遍卷积层，算出展平后的特征数，避免写死 64*7*7。"""
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, image_size, image_size)
+            return self._features(dummy).shape[1]
+
+    def _features(self, x):
+        x = self.pool(self.relu(self.conv1(x)))
+        x = self.pool(self.relu(self.conv2(x)))
+        return x.flatten(start_dim=1)
 
     def forward(self, x):
-        x = self.relu(self.conv1(x))
-        x = self.pool(x)
-        x = self.relu(self.conv2(x))
-        x = self.pool(x)
-        x = x.view(-1, 64 * 7 * 7)
+        x = self._features(x)
         x = self.relu(self.fc1(x))
         x = self.fc2(x)
         return x
@@ -86,8 +94,9 @@ def load_digit_data(batch_size=64, download_mnist=False):
             print(f"MNIST 加载失败，改用 sklearn digits 数据集：{error}")
 
     digits = load_digits()
+    # digits.images: (N, 8, 8) -> 补上 channel 维变成 (N, 1, 8, 8)，卷积层要求 4 维输入。
     images = torch.tensor(digits.images, dtype=torch.float32).unsqueeze(1) / 16.0
-    images = nn.functional.interpolate(images, size=(28, 28), mode="bilinear")
+    images = nn.functional.interpolate(images, size=(28, 28), mode="bilinear", align_corners=False)
     labels = torch.tensor(digits.target, dtype=torch.long)
     x_train, x_test, y_train, y_test = train_test_split(
         images,
@@ -179,7 +188,7 @@ def fit(model, train_loader, validation_loader, criterion, optimizer, device, ep
 
 
 # predict 展示单次预测的输入输出和结果
-def predict_one(model, test_loader, device, save_path="notebooks/prediction_example.png"):
+def predict_one(model, test_loader, device, save_path="prediction_example.png"):
     model.eval()
     images, labels = next(iter(test_loader))
     image = images[0:1].to(device)
@@ -195,6 +204,8 @@ def predict_one(model, test_loader, device, save_path="notebooks/prediction_exam
     print("模型原始输出 logits:", logits.cpu().numpy().round(3))
     print(f"真实标签: {true_label}, 预测标签: {predicted_label}, 置信度: {confidence:.2%}")
 
+    # 相对路径锚定到脚本所在目录，避免从别的目录运行时 savefig 报路径不存在。
+    save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), save_path)
     plt.figure(figsize=(3, 3))
     plt.imshow(images[0].squeeze().numpy(), cmap="gray")
     plt.title(f"true={true_label}, pred={predicted_label}")
